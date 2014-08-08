@@ -37,6 +37,8 @@
 
 #define PWM_FREQ 50000
 #define PWM_PERIOD (MCU_HZ/PWM_FREQ)
+/* L6234 adds 300 ns of deadtime. */
+#define DEADTIME (MCU_HZ/1000*300/1000000)
 
 static const float F_PI = 3.141592654f;
 
@@ -246,8 +248,29 @@ setup_timer_pwm(void)
   ROM_IntEnable(INT_TIMER4A);
   ROM_IntEnable(INT_TIMER4B);
   ROM_IntEnable(INT_TIMER5A);
+
   ROM_TimerEnable(TIMER4_BASE, TIMER_BOTH);
   ROM_TimerEnable(TIMER5_BASE, TIMER_A);
+
+  /*
+    Synchronise the timers.
+
+    We can not use wait-for-trigger, as there is an errata GPTM#04 that
+    wait-for-trigger is not available for PWM mode.
+
+    So we need to use the SYNC register.
+    There is also an errata for SYNC:
+
+      "GPTM#01 GPTMSYNC Bits Require Manual Clearing"
+
+    Since the sync register for all timers is in timer 0, that timer must be
+    enabled.
+  */
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
+  HWREG(TIMER0_BASE+TIMER_O_SYNC) |=
+    (uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC);
+  HWREG(TIMER0_BASE+TIMER_O_SYNC) &=
+    ~(uint32_t)(TIMER_4A_SYNC|TIMER_4B_SYNC|TIMER_5A_SYNC);
 }
 
 
@@ -274,9 +297,18 @@ static const float damper = 0.05f*2;
 static void
 set_pwm(float duty1, float duty2, float duty3)
 {
-  pwm1_match_value = (PWM_PERIOD-1-35) - (uint32_t)(damper*duty1*(PWM_PERIOD-1));
-  pwm2_match_value = (PWM_PERIOD-1-35) - (uint32_t)(damper*duty2*(PWM_PERIOD-1));
-  pwm3_match_value = (PWM_PERIOD-1-35) - (uint32_t)(damper*duty3*(PWM_PERIOD-1));
+  /*
+    The L6234 inserts 300 ns of deadtime to protect against both MOSFETs being
+    open at the same time. Adjust the PWM match value accordingly, so that we
+    get correct ratios between duty cycles also for small duty cycle values
+    (which may be needed to limit the current used in beefy motors).
+  */
+  pwm1_match_value = (PWM_PERIOD-DEADTIME) -
+    (uint32_t)(damper*duty1*(PWM_PERIOD-2*DEADTIME));
+  pwm2_match_value = (PWM_PERIOD-DEADTIME) -
+    (uint32_t)(damper*duty2*(PWM_PERIOD-2*DEADTIME));
+  pwm3_match_value = (PWM_PERIOD-DEADTIME) -
+    (uint32_t)(damper*duty3*(PWM_PERIOD-2*DEADTIME));
 }
 
 
@@ -394,7 +426,17 @@ int main()
     ROM_SysCtlDelay(MCU_HZ/3/1000);
     if (++counter >= 1000)
     {
+      uint32_t t1, t2, t3;
+      static volatile uint32_t v1, v2, v3;
       counter = 0;
+      /* Some volatile juggling to force hwreg accesses to be close to one another in the code */
+      v1 = 0;
+      t1 = HWREG(TIMER4_BASE + TIMER_O_TAV);
+      t2 = HWREG(TIMER4_BASE + TIMER_O_TBV);
+      t3 = HWREG(TIMER5_BASE + TIMER_O_TAV);
+      v1 = t1; v2 = t2; v3 = t3;
+      if (v1>=v2) println_uint32(v1-v2); else { serial_output_str("-"); println_uint32(v2-v1);}
+      if (v2>=v3) println_uint32(v2-v3); else { serial_output_str("-"); println_uint32(v3-v2);}
       serial_output_str(".");
       if (led_state)
       {
