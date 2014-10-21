@@ -292,7 +292,7 @@ l6234_disable(void)
 }
 
 
-static const float damper = 0.3f;
+static const float damper = 0.5f;
 
 static void
 set_pwm(float duty1, float duty2, float duty3)
@@ -384,6 +384,7 @@ int main()
 {
   uint32_t counter;
   uint32_t led_state;
+  uint32_t motor_target, motor_current;
 
   /* Use the full 80MHz system clock. */
   ROM_SysCtlClockSet(SYSCTL_SYSDIV_2_5 | SYSCTL_USE_PLL |
@@ -417,23 +418,33 @@ int main()
   counter = 0;
   led_state = 0;
 
-  motor_max = 50000/(7*1);
+  /*
+    Start slowly, then ramp up speed.
+    That's a primitive way to start up without actually measuring the
+    position of the motor phases with feedback or hall sensors.
+  */
+  motor_max = 16000;
+  motor_target = 50000/(7*5);
   l6234_enable();
 
   for (;;)
   {
     ROM_SysCtlDelay(MCU_HZ/3/1000);
-    if (++counter >= 1000)
+    if (++counter >= 50)
     {
       counter = 0;
 
-      /* Show the value of the pwm match registers... */
-      serial_output_str("ph1: ");
-      println_uint32(HWREG(TIMER4_BASE + TIMER_O_TAMATCHR));
-      serial_output_str("  ph2: ");
-      println_uint32(HWREG(TIMER4_BASE + TIMER_O_TBMATCHR));
-      serial_output_str("  ph3: ");
-      println_uint32(HWREG(TIMER5_BASE + TIMER_O_TAMATCHR));
+      /* Ramp up the speed until we hit the target speed. */
+      motor_current = motor_max;
+      if (motor_current > motor_target)
+      {
+        uint32_t delta = motor_current - motor_target;
+        if (delta > 1000)
+          delta = 200;
+        else if (delta > 100)
+          delta = 100;
+        motor_max = motor_current - delta;
+      }
 
       if (led_state)
       {
