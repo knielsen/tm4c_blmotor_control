@@ -292,7 +292,7 @@ l6234_disable(void)
 }
 
 
-static const float damper = 0.05f*2;
+static const float damper = 0.3f;
 
 static void
 set_pwm(float duty1, float duty2, float duty3)
@@ -304,11 +304,11 @@ set_pwm(float duty1, float duty2, float duty3)
     (which may be needed to limit the current used in beefy motors).
   */
   pwm1_match_value = (PWM_PERIOD-DEADTIME) -
-    (uint32_t)(damper*duty1*(PWM_PERIOD-2*DEADTIME));
+    (uint32_t)(duty1 * (damper*(float)(PWM_PERIOD-2*DEADTIME)));
   pwm2_match_value = (PWM_PERIOD-DEADTIME) -
-    (uint32_t)(damper*duty2*(PWM_PERIOD-2*DEADTIME));
+    (uint32_t)(duty2 * (damper*(float)(PWM_PERIOD-2*DEADTIME)));
   pwm3_match_value = (PWM_PERIOD-DEADTIME) -
-    (uint32_t)(damper*duty3*(PWM_PERIOD-2*DEADTIME));
+    (uint32_t)(duty3 * (damper*(float)(PWM_PERIOD-2*DEADTIME)));
 }
 
 
@@ -375,7 +375,7 @@ motor_update(void)
   }
   motor_idx = l_idx;
 
-  angle = (float)l_idx/(float)l_max*(2*F_PI);
+  angle = (float)l_idx/(float)l_max*(2.0f*F_PI);
   set_motor(angle);
 }
 
@@ -417,8 +417,7 @@ int main()
   counter = 0;
   led_state = 0;
 
-//  motor_max = 476;
-  motor_max = 16000*8;
+  motor_max = 50000/(7*1);
   l6234_enable();
 
   for (;;)
@@ -426,18 +425,16 @@ int main()
     ROM_SysCtlDelay(MCU_HZ/3/1000);
     if (++counter >= 1000)
     {
-      uint32_t t1, t2, t3;
-      static volatile uint32_t v1, v2, v3;
       counter = 0;
-      /* Some volatile juggling to force hwreg accesses to be close to one another in the code */
-      v1 = 0;
-      t1 = HWREG(TIMER4_BASE + TIMER_O_TAV);
-      t2 = HWREG(TIMER4_BASE + TIMER_O_TBV);
-      t3 = HWREG(TIMER5_BASE + TIMER_O_TAV);
-      v1 = t1; v2 = t2; v3 = t3;
-      if (v1>=v2) println_uint32(v1-v2); else { serial_output_str("-"); println_uint32(v2-v1);}
-      if (v2>=v3) println_uint32(v2-v3); else { serial_output_str("-"); println_uint32(v3-v2);}
-      serial_output_str(".");
+
+      /* Show the value of the pwm match registers... */
+      serial_output_str("ph1: ");
+      println_uint32(HWREG(TIMER4_BASE + TIMER_O_TAMATCHR));
+      serial_output_str("  ph2: ");
+      println_uint32(HWREG(TIMER4_BASE + TIMER_O_TBMATCHR));
+      serial_output_str("  ph3: ");
+      println_uint32(HWREG(TIMER5_BASE + TIMER_O_TAMATCHR));
+
       if (led_state)
       {
         led_off();
