@@ -380,11 +380,30 @@ motor_update(void)
 }
 
 
+static void
+setup_systick(void)
+{
+  ROM_SysTickPeriodSet(0xffffff+1);
+  /* Force reload. */
+  HWREG(NVIC_ST_CURRENT) = 0;
+  ROM_SysTickEnable();
+}
+
+
+static const uint32_t time_period= 0x1000000;
+static inline uint32_t
+get_time(void)
+{
+  return HWREG(NVIC_ST_CURRENT);
+}
+
+
 int main()
 {
-  uint32_t counter;
   uint32_t led_state;
-  uint32_t motor_target, motor_current;
+  uint32_t time_wraps, last_time;
+  float rampup_seconds, electric_rps;
+  float next_checkpoint_seconds;
 
   /* Use the full 80MHz system clock. */
   ROM_SysCtlClockSet(SYSCTL_SYSDIV_2_5 | SYSCTL_USE_PLL |
@@ -413,9 +432,12 @@ int main()
   setup_timer_pwm();
   l6234_disable();
 
+  setup_systick();
+  last_time = get_time();
+  time_wraps = 0;
+
   serial_output_str("Motor controller init done\r\n");
 
-  counter = 0;
   led_state = 0;
 
   /*
@@ -423,28 +445,27 @@ int main()
     That's a primitive way to start up without actually measuring the
     position of the motor phases with feedback or hall sensors.
   */
-  motor_max = 16000;
-  motor_target = 50000/(7*5);
+  rampup_seconds = 10.0f;
+  electric_rps = 7.0f*5.0f;
   l6234_enable();
 
+  next_checkpoint_seconds = 0.500f;
   for (;;)
   {
-    ROM_SysCtlDelay(MCU_HZ/3/1000);
-    if (++counter >= 50)
-    {
-      counter = 0;
+    float seconds;
+    uint32_t cur_time;
 
-      /* Ramp up the speed until we hit the target speed. */
-      motor_current = motor_max;
-      if (motor_current > motor_target)
-      {
-        uint32_t delta = motor_current - motor_target;
-        if (delta > 1000)
-          delta = 200;
-        else if (delta > 100)
-          delta = 100;
-        motor_max = motor_current - delta;
-      }
+    cur_time = get_time();
+    if (cur_time > last_time)
+      ++time_wraps;
+    seconds = (float)time_wraps*((float)time_period/(float)MCU_HZ) +
+      (float)((time_period-1) - cur_time)*(1.0f/(float)MCU_HZ);
+    last_time = cur_time;
+
+    if (seconds >= next_checkpoint_seconds)
+    {
+      next_checkpoint_seconds += 0.500f;
+      println_float(seconds, 3, 3);
 
       if (led_state)
       {
@@ -456,6 +477,21 @@ int main()
         led_on();
         led_state = 1;
       }
+    }
+
+    if (seconds <= rampup_seconds + 0.1f)
+    {
+      float s, cur_electric_rps;
+
+      /* Ramp up the speed until we hit the target speed. */
+      if (seconds < rampup_seconds)
+        s = seconds;
+      else
+        s = rampup_seconds;
+
+      cur_electric_rps = electric_rps*(s/rampup_seconds);
+
+      motor_max = (uint32_t)(50000.0f/cur_electric_rps);
     }
   }
 }
