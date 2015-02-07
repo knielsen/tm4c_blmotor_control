@@ -292,7 +292,7 @@ l6234_disable(void)
 }
 
 
-static const float damper = 0.5f;
+static const float damper = 0.3f;
 
 static void
 set_pwm(float duty1, float duty2, float duty3)
@@ -446,7 +446,7 @@ int main()
     position of the motor phases with feedback or hall sensors.
   */
   rampup_seconds = 10.0f;
-  electric_rps = 7.0f*5.0f;
+  electric_rps = 4.0f*25.0f;
   l6234_enable();
 
   next_checkpoint_seconds = 0.500f;
