@@ -292,7 +292,7 @@ l6234_disable(void)
 }
 
 
-static const float damper = 0.3f;
+static float damper = 0.3f;
 
 static void
 set_pwm(float duty1, float duty2, float duty3)
@@ -404,6 +404,7 @@ int main()
   uint32_t time_wraps, last_time;
   float rampup_seconds, electric_rps;
   float next_checkpoint_seconds;
+  uint32_t hit_target = 0;
 
   /* Use the full 80MHz system clock. */
   ROM_SysCtlClockSet(SYSCTL_SYSDIV_2_5 | SYSCTL_USE_PLL |
@@ -445,8 +446,8 @@ int main()
     That's a primitive way to start up without actually measuring the
     position of the motor phases with feedback or hall sensors.
   */
-  rampup_seconds = 10.0f;
-  electric_rps = 4.0f*25.0f;
+  rampup_seconds = 8.0f;
+  electric_rps = 4.0f*15.305f;
   l6234_enable();
 
   next_checkpoint_seconds = 0.500f;
@@ -479,7 +480,7 @@ int main()
       }
     }
 
-    if (seconds <= rampup_seconds + 0.1f)
+    if (seconds <= rampup_seconds + 0.1f && !hit_target)
     {
       float s, cur_electric_rps;
 
@@ -487,11 +488,15 @@ int main()
       if (seconds < rampup_seconds)
         s = seconds;
       else
+      {
         s = rampup_seconds;
+        hit_target = 1;
+      }
 
       cur_electric_rps = electric_rps*(s/rampup_seconds);
 
-      motor_max = (uint32_t)(50000.0f/cur_electric_rps);
+      damper = 0.3f + 0.2f * (s/rampup_seconds);
+      motor_max = (uint32_t)(((float)PWM_FREQ)/cur_electric_rps);
     }
   }
 }
