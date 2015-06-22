@@ -405,6 +405,7 @@ int main()
   float rampup_seconds, electric_rps;
   float next_checkpoint_seconds;
   uint32_t hit_target = 0;
+  float cur_electric_rps = 0.0f;
 
   /* Use the full 80MHz system clock. */
   ROM_SysCtlClockSet(SYSCTL_SYSDIV_2_5 | SYSCTL_USE_PLL |
@@ -466,7 +467,7 @@ int main()
     if (seconds >= next_checkpoint_seconds)
     {
       next_checkpoint_seconds += 0.500f;
-      println_float(seconds, 3, 3);
+      println_float(cur_electric_rps, 3, 3);
 
       if (led_state)
       {
@@ -482,7 +483,7 @@ int main()
 
     if (seconds <= rampup_seconds + 0.1f && !hit_target)
     {
-      float s, cur_electric_rps;
+      float s;
 
       /* Ramp up the speed until we hit the target speed. */
       if (seconds < rampup_seconds)
