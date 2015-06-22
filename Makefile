@@ -1,7 +1,7 @@
 TARGET=blmotor_control
 
 GCCDIR=/home/knielsen/devel/study/stellaris-arm/install
-BINDIR=$(GCCDIR)/bin
+BINDIR=/usr/bin
 CC=$(BINDIR)/arm-none-eabi-gcc
 LD=$(BINDIR)/arm-none-eabi-ld
 OBJCOPY=$(BINDIR)/arm-none-eabi-objcopy
@@ -43,9 +43,9 @@ clean:
 	rm -f $(OBJS) $(TARGET).elf $(TARGET).bin $(STARTUP).o
 
 tty:
-	stty -F/dev/ttyACM0 raw -echo -hup cs8 -parenb -cstopb 500000
+	stty -F/dev/ttyACM1 raw -echo -hup cs8 -parenb -cstopb 500000
 
 cat:
-	cat /dev/ttyACM0
+	cat /dev/ttyACM1
 
 .PHONY: all clean flash tty cat
