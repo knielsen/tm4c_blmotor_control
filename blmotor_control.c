@@ -406,6 +406,7 @@ int main()
   float next_checkpoint_seconds;
   uint32_t hit_target = 0;
   float cur_electric_rps = 0.0f;
+  long user_input;
 
   /* Use the full 80MHz system clock. */
   ROM_SysCtlClockSet(SYSCTL_SYSDIV_2_5 | SYSCTL_USE_PLL |
@@ -467,7 +468,14 @@ int main()
     if (seconds >= next_checkpoint_seconds)
     {
       next_checkpoint_seconds += 0.500f;
+      serial_output_str("eRPS:\t");
       println_float(cur_electric_rps, 3, 3);
+      serial_output_str("  ...\t");
+      println_float((float)PWM_FREQ/(float)motor_max, 3, 3);
+      serial_output_str("  mmax:\t");
+      println_uint32(motor_max);
+      serial_output_str("  damp:\t");
+      println_float(damper, 1, 4);
 
       if (led_state)
       {
@@ -498,6 +506,68 @@ int main()
 
       damper = 0.3f + 0.2f * (s/rampup_seconds);
       motor_max = (uint32_t)(((float)PWM_FREQ)/cur_electric_rps);
+    }
+
+    user_input = ROM_UARTCharGetNonBlocking(UART0_BASE);
+    if (user_input > 0)
+    {
+      char ch = (char)user_input;
+
+      switch(ch)
+      {
+      case 'w':
+        if (motor_max >= 100)
+          motor_max -= 100;
+        break;
+      case 'q':
+        if (motor_max < 1000000000)
+          motor_max += 100;
+        break;
+      case 'a':
+        if (motor_max >= 10)
+          motor_max -= 10;
+        break;
+      case 's':
+        if (motor_max < 1000000000)
+          motor_max += 10;
+        break;
+      case 'z':
+        if (motor_max >= 1)
+          --motor_max;
+        break;
+      case 'x':
+        if (motor_max < 1000000000)
+          ++motor_max;
+        break;
+      case 'o':
+        if (damper >= 0.05f)
+          damper -= 0.05f;
+        break;
+      case 'p':
+        if (damper <= 1.0f - 0.05f)
+          damper += 0.05f;
+        break;
+      case 'l':
+        if (damper >= 0.01f)
+          damper -= 0.01f;
+        break;
+      case ';':
+        if (damper <= 1.0f - 0.01f)
+          damper += 0.01f;
+        break;
+      case '.':
+        if (damper >= 0.001f)
+          damper -= 0.001f;
+        break;
+      case '/':
+        if (damper <= 1.0f - 0.001f)
+          damper += 0.001f;
+        break;
+      default:
+        ROM_UARTCharPut(UART0_BASE, '[');
+        ROM_UARTCharPut(UART0_BASE, ch);
+        ROM_UARTCharPut(UART0_BASE, ']');
+      }
     }
   }
 }
