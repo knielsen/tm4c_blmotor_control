@@ -12,12 +12,16 @@
 #include "inc/hw_ints.h"
 #include "inc/hw_timer.h"
 #include "inc/hw_nvic.h"
+#include "inc/hw_i2c.h"
 #include "driverlib/gpio.h"
 #include "driverlib/rom.h"
 #include "driverlib/sysctl.h"
 #include "driverlib/uart.h"
 #include "driverlib/timer.h"
 #include "driverlib/interrupt.h"
+#include "driverlib/i2c.h"
+
+#include "mpu6050.h"
 
 
 /*
@@ -29,6 +33,12 @@
     EN1   PG3
     EN2   PG4
     EN3   PG5
+
+
+  MPU6050:
+    SCL   PD0  (POV3 SCLK på pcb_pov)
+    SDA   PD1  (POV3 MODE på pcb_pov)
+    AD0   GND
 */
 
 /* To change this, must fix clock setup in the code. */
@@ -40,6 +50,16 @@
 /* L6234 adds 300 ns of deadtime. */
 #define DEADTIME (MCU_HZ/1000*300/1000000)
 
+
+/* MPU6050 stuff */
+#define MPU6050_I2C_ADDR 0x68
+#define SAMPLE_RATE 1000
+
+
+/* Define this to get raw accelerometer data out. */
+//#define RAW_DATA 1
+
+
 static const float F_PI = 3.141592654f;
 
 static void motor_update(void);
@@ -48,7 +68,9 @@ static void motor_update(void);
 static void
 serial_output_hexdig(uint32_t dig)
 {
+#ifndef RAW_DATA
   ROM_UARTCharPut(UART0_BASE, (dig >= 10 ? 'A' - 10 + dig : '0' + dig));
+#endif
 }
 
 
@@ -64,10 +86,12 @@ serial_output_hexbyte(uint8_t byte)
 static void
 serial_output_str(const char *str)
 {
+#ifndef RAW_DATA
   char c;
 
   while ((c = *str++))
     ROM_UARTCharPut(UART0_BASE, c);
+#endif
 }
 
 
@@ -398,12 +422,241 @@ get_time(void)
 }
 
 
+static void
+write_mpu6050_reg(uint8_t reg, uint8_t val)
+{
+  unsigned long err;
+
+  ROM_I2CMasterSlaveAddrSet(I2C3_MASTER_BASE, MPU6050_I2C_ADDR, 0);
+  ROM_I2CMasterDataPut(I2C3_MASTER_BASE, reg);
+  ROM_I2CMasterControl(I2C3_MASTER_BASE, I2C_MASTER_CMD_BURST_SEND_START);
+  /*
+    ToDo: Need some kind of timeout here. Otherwise it seems we get
+    stuck forever if eg. there is no MPU6050 or the communication fails
+    somehow.
+  */
+  while (ROM_I2CMasterBusy(I2C3_MASTER_BASE))
+    ;
+  err = ROM_I2CMasterErr(I2C3_MASTER_BASE);
+  if (err)
+  {
+    if (!(err & I2C_MCS_ARBLST))
+      ROM_I2CMasterControl(I2C3_MASTER_BASE, I2C_MASTER_CMD_BURST_SEND_STOP);
+    serial_output_str("Got error from I2C on first byte: ");
+    println_uint32((uint32_t)err);
+    return;
+  }
+  ROM_I2CMasterDataPut(I2C3_MASTER_BASE, val);
+  ROM_I2CMasterControl(I2C3_MASTER_BASE, I2C_MASTER_CMD_BURST_SEND_FINISH);
+  while (ROM_I2CMasterBusy(I2C3_MASTER_BASE))
+    ;
+  err = ROM_I2CMasterErr(I2C3_MASTER_BASE);
+  if (err)
+  {
+    serial_output_str("Got error from I2C on last byte: ");
+    println_uint32((uint32_t)err);
+  }
+}
+
+
+static void
+read_mpu6050_reg_multi(uint8_t reg, uint8_t *buf, uint32_t len)
+{
+  unsigned long err;
+
+  if (len == 0)
+    return;
+  ROM_I2CMasterSlaveAddrSet(I2C3_MASTER_BASE, MPU6050_I2C_ADDR, 0);
+  ROM_I2CMasterDataPut(I2C3_MASTER_BASE, reg);
+  ROM_I2CMasterControl(I2C3_MASTER_BASE, I2C_MASTER_CMD_BURST_SEND_START);
+  while (ROM_I2CMasterBusy(I2C3_MASTER_BASE))
+    ;
+  err = ROM_I2CMasterErr(I2C3_MASTER_BASE);
+  if (err)
+  {
+    if (!(err & I2C_MCS_ARBLST))
+      ROM_I2CMasterControl(I2C3_MASTER_BASE, I2C_MASTER_CMD_BURST_SEND_STOP);
+    serial_output_str("Receive: Got error from I2C on reg: ");
+    println_uint32((uint32_t)err);
+    return;
+  }
+
+  ROM_I2CMasterSlaveAddrSet(I2C3_MASTER_BASE, MPU6050_I2C_ADDR, 1);
+  ROM_I2CMasterControl(I2C3_MASTER_BASE,
+                       (len == 1 ?
+                        I2C_MASTER_CMD_SINGLE_RECEIVE :
+                        I2C_MASTER_CMD_BURST_RECEIVE_START));
+  for (;;)
+  {
+    while (ROM_I2CMasterBusy(I2C3_MASTER_BASE))
+      ;
+    err = ROM_I2CMasterErr(I2C3_MASTER_BASE);
+    if (err)
+    {
+      if (!(err & I2C_MCS_ARBLST))
+        ROM_I2CMasterControl(I2C3_MASTER_BASE, I2C_MASTER_CMD_BURST_RECEIVE_ERROR_STOP);
+      serial_output_str("Receive: Got error from I2C: ");
+      println_uint32((uint32_t)err);
+      return;
+    }
+    *buf++ = ROM_I2CMasterDataGet(I2C3_MASTER_BASE);
+    --len;
+    if (len == 0)
+      break;
+    ROM_I2CMasterControl(I2C3_MASTER_BASE,
+                         (len == 1 ? I2C_MASTER_CMD_BURST_RECEIVE_FINISH :
+                                     I2C_MASTER_CMD_BURST_RECEIVE_CONT));
+  }
+}
+
+
+static uint8_t
+read_mpu6050_reg(uint8_t reg)
+{
+  uint8_t val = 0;
+
+  read_mpu6050_reg_multi(reg, &val, 1);
+  return val;
+}
+
+
+static void
+config_i2c_mpu6050(void)
+{
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_I2C3);
+  ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
+  {
+    //ROM_GPIOPinTypeI2CSCL(GPIO_PORTD_BASE, GPIO_PIN_0);
+    ROM_GPIODirModeSet(GPIO_PORTD_BASE, GPIO_PIN_0, GPIO_DIR_MODE_HW);
+    ROM_GPIOPadConfigSet(GPIO_PORTD_BASE, GPIO_PIN_0,
+                         GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD);
+  }
+  ROM_GPIOPinTypeI2C(GPIO_PORTD_BASE, GPIO_PIN_1);
+  ROM_GPIOPinConfigure(GPIO_PD0_I2C3SCL);
+  ROM_GPIOPinConfigure(GPIO_PD1_I2C3SDA);
+  ROM_I2CMasterInitExpClk(I2C3_MASTER_BASE, MCU_HZ, 1);
+  ROM_I2CMasterSlaveAddrSet(I2C3_MASTER_BASE, MPU6050_I2C_ADDR, 0);
+}
+
+
+static inline float
+sensor_value(uint8_t *p, float max)
+{
+  int16_t iv;
+  float v;
+
+  iv = (int16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+  v = (float)iv * (max / 32768.0f);
+  return v;
+}
+
+
+static void
+config_mpu6050(void)
+{
+  uint8_t buf[14];
+  uint32_t i;
+
+  config_i2c_mpu6050();
+
+  for (;;)
+  {
+    uint8_t res;
+
+    /*
+      First take it out of sleep mode (writes seem to not stick until we take it
+      out of sleep mode). Then issue a reset to get a well-defined starting state
+      (and go out of sleep mode again).
+    */
+    write_mpu6050_reg(MPU6050_REG_PWR_MGMT_1, 0x02);
+    ROM_SysCtlDelay(150000);
+    res = read_mpu6050_reg(MPU6050_REG_PWR_MGMT_1);
+    serial_output_str("Read PWR_MGMT=");
+    println_uint32(res);
+    if (res != 0x02)
+      continue;
+    write_mpu6050_reg(MPU6050_REG_PWR_MGMT_1, 0x82);
+    ROM_SysCtlDelay(150000);
+    res = read_mpu6050_reg(MPU6050_REG_PWR_MGMT_1);
+    serial_output_str("Read2 PWR_MGMT=");
+    println_uint32(res);
+    if (res != 0x40)
+      continue;
+    write_mpu6050_reg(MPU6050_REG_PWR_MGMT_1, 0x02);
+    ROM_SysCtlDelay(150000);
+    res = read_mpu6050_reg(MPU6050_REG_PWR_MGMT_1);
+    serial_output_str("Read3 PWR_MGMT=");
+    println_uint32(res);
+    if (res != 0x02)
+      continue;
+
+    /* Disable digital low-pass filter (DLPF) */
+    write_mpu6050_reg(MPU6050_REG_CONFIG, 0);
+    /* 1000 Hz sample rate. */
+    write_mpu6050_reg(MPU6050_REG_SMPRT_DIV, 7);
+    /*
+      Resolution and range. 3 is lowest resolution, +-2000 degrees / second
+      and +-16g.
+    */
+    write_mpu6050_reg(MPU6050_REG_GYRO_CONFIG, 2 << 3);
+    write_mpu6050_reg(MPU6050_REG_ACCEL_CONFIG, 0 << 3);
+    /* Disable the Fifo (write 0xf8 to enable temp+gyros_accel). */
+    write_mpu6050_reg(MPU6050_REG_FIFO_EN, 0x00);
+    /*
+      Interrupt. Active high, push-pull, hold until cleared, cleared only on
+      read of status.
+    */
+    write_mpu6050_reg(MPU6050_REG_INT_PIN_CFG, 0x20);
+    /* Enable FIFO overflow and data ready interrupts. */
+    write_mpu6050_reg(MPU6050_REG_INT_ENABLE, 0x11);
+    /* Disable the FIFO and external I2C master mode. */
+    write_mpu6050_reg(MPU6050_REG_USER_CTRL, 0x00);
+
+    break;
+  }
+
+  serial_output_str("Read ACCEL_CONFIG=");
+  serial_output_hexbyte(read_mpu6050_reg(MPU6050_REG_ACCEL_CONFIG));
+  serial_output_str("\n");
+
+  read_mpu6050_reg_multi(MPU6050_REG_ACCEL_XOUT_H, buf, 14);
+  serial_output_str("Reading:");
+  for (i = 0; i < 14; ++i)
+  {
+    serial_output_str(" ");
+    serial_output_hexbyte(buf[i]);
+  }
+  serial_output_str("\r\n");
+  serial_output_str("ACC_X:\t");
+  println_float(sensor_value(&buf[0], 2.0f), 2, 3);
+  serial_output_str("ACC_Y:\t");
+  println_float(sensor_value(&buf[2], 2.0f), 2, 3);
+  serial_output_str("ACC_Z:\t");
+  println_float(sensor_value(&buf[4], 2.0f), 2, 3);
+  serial_output_str("TEMP:\t");
+  println_float(sensor_value(&buf[6], 32768.0f)/340.0f + 36.53f, 3, 2);
+  serial_output_str("GYRO_X:\t");
+  println_float(sensor_value(&buf[8], 1000.0f), 4, 1);
+  serial_output_str("GYRO_Y:\t");
+  println_float(sensor_value(&buf[10], 1000.0f), 4, 1);
+  serial_output_str("GYRO_Z:\t");
+  println_float(sensor_value(&buf[12], 1000.0f), 4, 1);
+}
+
+
+static void
+mpu6050_read_accel(uint8_t buf[6])
+{
+  read_mpu6050_reg_multi(MPU6050_REG_ACCEL_XOUT_H, buf, 6);
+}
+
+
 int main()
 {
   uint32_t led_state;
   uint32_t time_wraps, last_time;
   float rampup_seconds, electric_rps;
-  float next_checkpoint_seconds;
+  float next_checkpoint_seconds, next_mpu_seconds, end_mpu_seconds;
   uint32_t hit_target = 0;
   float cur_electric_rps = 0.0f;
   long user_input;
@@ -435,6 +688,8 @@ int main()
   setup_timer_pwm();
   l6234_disable();
 
+  //config_mpu6050();
+
   setup_systick();
   last_time = get_time();
   time_wraps = 0;
@@ -453,6 +708,8 @@ int main()
   l6234_enable();
 
   next_checkpoint_seconds = 0.500f;
+  next_mpu_seconds = 0.001f;
+  end_mpu_seconds = 0.000f;
   for (;;)
   {
     float seconds;
@@ -500,6 +757,8 @@ int main()
       {
         s = rampup_seconds;
         hit_target = 1;
+        next_mpu_seconds = seconds + 1.001f;
+        end_mpu_seconds = seconds + 2.000f;
       }
 
       cur_electric_rps = electric_rps*(s/rampup_seconds);
@@ -563,11 +822,26 @@ int main()
         if (damper <= 1.0f - 0.001f)
           damper += 0.001f;
         break;
+#ifndef RAW_DATA
       default:
         ROM_UARTCharPut(UART0_BASE, '[');
         ROM_UARTCharPut(UART0_BASE, ch);
         ROM_UARTCharPut(UART0_BASE, ']');
+#endif
       }
     }
+
+#ifdef RAW_DATA
+    /* ToDo: This will get rounding errors, could be done better ... */
+    if (hit_target && seconds >= next_mpu_seconds && seconds < end_mpu_seconds)
+    {
+      uint8_t buf[6];
+      int i;
+      next_mpu_seconds += 0.001f;
+      mpu6050_read_accel(buf);
+      for (i = 0; i < 6; ++i)
+        ROM_UARTCharPut(UART0_BASE, buf[i]);
+    }
+#endif
   }
 }
