@@ -57,6 +57,7 @@
 
 
 /* Define this to get raw accelerometer data out. */
+// ToDo: Enable/disable this with a key instead?
 //#define RAW_DATA 1
 
 
@@ -379,28 +380,93 @@ IntHandlerTimer5A(void)
 }
 
 
-static volatile uint32_t motor_max = 0;
-static uint32_t motor_idx = 0;
+/*
+  The current electrical angle.
+  One turn corresponds to a value of 2**32.
+*/
+static volatile uint32_t cur_angle = 0;
+/* The current speed, added to cur_angle every 1/PWM_FREQ. */
+static volatile uint32_t angle_inc = 0;
+/* Counter, counting at PWM_FREQ. */
+static volatile uint32_t cur_pwm_tick = 0;
+/* Counter, increments by one every electric turn (360 degree). */
+static volatile uint32_t cur_elec_turns = 0;
+/*
+  Speed control.
+
+  A value of SPEED_STABLE means the speed is currently not changing.
+
+  A value of SPEED_CHANGING means the interrupt routine is in the process
+  of speeding the motor gently up or down.
+
+  Setting this to SPEED_CHANGE causes the interrupt routine to start
+  changing the speed to change_speed_start, over an interval of
+  speed_change_duration ticks (at PWM_FREQ Hz). The speed is the value
+  of angle_inc.
+*/
+enum { SPEED_STABLE, SPEED_CHANGE, SPEED_CHANGING };
+static volatile uint8_t speed_change_status = SPEED_STABLE;
+static volatile uint32_t speed_change_to = 0;
+static volatile uint32_t speed_change_duration = 0;
+/* Internal state for speed change. */
+static uint32_t change_speed_from = 0;
+static uint32_t change_speed_delta = 0;
+static uint32_t change_speed_start = 0;
+static uint32_t change_speed_interval = 0;
+/* Counter that increments by one for each electrical 360 degree turn. */
+static volatile uint32_t cur_elec_turns;
 
 static void
 motor_update(void)
 {
-  uint32_t l_idx, l_max;
-  float angle;
+  uint32_t l_angle, l_inc, tmp;
+  uint32_t l_tick;
+  uint8_t l_status;
+  float f_angle;
 
-  l_max = motor_max;
-  if (l_max == 0)
-    return;
-  l_idx = motor_idx;
-  ++l_idx;
-  if (l_idx >= motor_max)
+  /* Set the PWM for the current electrical angle. */
+  l_angle = cur_angle;
+  f_angle = (float)l_angle * (2.0f*F_PI/4294967296.0f);
+  set_motor(f_angle);
+
+  /* Increment the electrical angle at the current speed. */
+  l_inc = angle_inc;
+  tmp = l_angle + angle_inc;
+  if (tmp > l_angle)
+    ++cur_elec_turns;
+  l_angle = tmp;
+  cur_angle = l_angle;
+
+  l_tick = cur_pwm_tick;
+  l_status = speed_change_status;
+  if (l_status == SPEED_CHANGING)
   {
-    l_idx = 0;
-  }
-  motor_idx = l_idx;
+    /* Do the next step of speed change. */
+    uint32_t l_start = change_speed_start;
+    uint32_t l_interval = change_speed_interval;
+    uint32_t l_from = change_speed_from;
+    int64_t delta = change_speed_delta;
+    uint32_t sofar;
 
-  angle = (float)l_idx/(float)l_max*(2.0f*F_PI);
-  set_motor(angle);
+    sofar = l_tick - l_start;
+    delta = (delta * sofar + l_interval/2) / l_interval;
+    l_inc = (int64_t)l_from + delta;
+    angle_inc = l_inc;
+    /* Check if speed change is complete. */
+    if (sofar >= l_interval)
+      speed_change_status = l_status = SPEED_STABLE;
+  }
+  else if (l_status == SPEED_CHANGE)
+  {
+    /* Setup state to start changing speed as requested. */
+    change_speed_from = l_inc;
+    change_speed_delta = (int32_t)(speed_change_to - l_inc);
+    change_speed_start = l_tick;
+    change_speed_interval = speed_change_duration;
+    speed_change_status = l_status = SPEED_CHANGING;
+  }
+
+  cur_pwm_tick = l_tick + 1;
 }
 
 
@@ -551,6 +617,7 @@ sensor_value(uint8_t *p, float max)
 }
 
 
+ __attribute__ ((unused))
 static void
 config_mpu6050(void)
 {
@@ -644,6 +711,7 @@ config_mpu6050(void)
 }
 
 
+ __attribute__ ((unused))
 static void
 mpu6050_read_accel(uint8_t buf[6])
 {
@@ -656,9 +724,11 @@ int main()
   uint32_t led_state;
   uint32_t time_wraps, last_time;
   float rampup_seconds, electric_rps;
-  float next_checkpoint_seconds, next_mpu_seconds, end_mpu_seconds;
+  float next_checkpoint_seconds;
+#ifdef RAW_DATA
+  float next_mpu_seconds, end_mpu_seconds;
+#endif
   uint32_t hit_target = 0;
-  float cur_electric_rps = 0.0f;
   long user_input;
 
   /* Use the full 80MHz system clock. */
@@ -705,11 +775,18 @@ int main()
   */
   rampup_seconds = 8.0f;
   electric_rps = 4.0f*15.305f;
+  damper = 0.4f;
+
+  speed_change_to = electric_rps*((float)0x100000000/(float)PWM_FREQ);
+  speed_change_duration = (uint32_t)(rampup_seconds * PWM_FREQ);
+  speed_change_status = SPEED_CHANGE;
   l6234_enable();
 
   next_checkpoint_seconds = 0.500f;
+#ifdef RAW_DATA
   next_mpu_seconds = 0.001f;
   end_mpu_seconds = 0.000f;
+#endif
   for (;;)
   {
     float seconds;
@@ -726,11 +803,9 @@ int main()
     {
       next_checkpoint_seconds += 0.500f;
       serial_output_str("eRPS:\t");
-      println_float(cur_electric_rps, 3, 3);
-      serial_output_str("  ...\t");
-      println_float((float)PWM_FREQ/(float)motor_max, 3, 3);
-      serial_output_str("  mmax:\t");
-      println_uint32(motor_max);
+      println_float((float)angle_inc*((float)PWM_FREQ/(float)0x100000000), 3, 3);
+      serial_output_str("  ainc:\t");
+      println_uint32(angle_inc);
       serial_output_str("  damp:\t");
       println_float(damper, 1, 4);
 
@@ -746,25 +821,13 @@ int main()
       }
     }
 
-    if (seconds <= rampup_seconds + 0.1f && !hit_target)
+    if (speed_change_status == SPEED_STABLE && !hit_target)
     {
-      float s;
-
-      /* Ramp up the speed until we hit the target speed. */
-      if (seconds < rampup_seconds)
-        s = seconds;
-      else
-      {
-        s = rampup_seconds;
-        hit_target = 1;
-        next_mpu_seconds = seconds + 1.001f;
-        end_mpu_seconds = seconds + 2.000f;
-      }
-
-      cur_electric_rps = electric_rps*(s/rampup_seconds);
-
-      damper = 0.3f + 0.2f * (s/rampup_seconds);
-      motor_max = (uint32_t)(((float)PWM_FREQ)/cur_electric_rps);
+      hit_target = 1;
+#ifdef RAW_DATA
+      next_mpu_seconds = seconds + 1.001f;
+      end_mpu_seconds = seconds + 2.000f;
+#endif
     }
 
     user_input = ROM_UARTCharGetNonBlocking(UART0_BASE);
@@ -775,28 +838,28 @@ int main()
       switch(ch)
       {
       case 'w':
-        if (motor_max >= 100)
-          motor_max -= 100;
+        if (angle_inc >= 100000)
+          angle_inc -= 100000;
         break;
       case 'q':
-        if (motor_max < 1000000000)
-          motor_max += 100;
+        if (angle_inc < 1000000000)
+          angle_inc += 100000;
         break;
       case 'a':
-        if (motor_max >= 10)
-          motor_max -= 10;
+        if (angle_inc >= 10000)
+          angle_inc -= 10000;
         break;
       case 's':
-        if (motor_max < 1000000000)
-          motor_max += 10;
+        if (angle_inc < 1000000000)
+          angle_inc += 10000;
         break;
       case 'z':
-        if (motor_max >= 1)
-          --motor_max;
+        if (angle_inc >= 1000)
+          angle_inc -= 1000;
         break;
       case 'x':
-        if (motor_max < 1000000000)
-          ++motor_max;
+        if (angle_inc < 1000000000)
+          angle_inc += 1000;
         break;
       case 'o':
         if (damper >= 0.05f)
