@@ -410,11 +410,9 @@ static volatile uint32_t speed_change_to = 0;
 static volatile uint32_t speed_change_duration = 0;
 /* Internal state for speed change. */
 static uint32_t change_speed_from = 0;
-static uint32_t change_speed_delta = 0;
+static int32_t change_speed_delta = 0;
 static uint32_t change_speed_start = 0;
 static uint32_t change_speed_interval = 0;
-/* Counter that increments by one for each electrical 360 degree turn. */
-static volatile uint32_t cur_elec_turns;
 
 static void
 motor_update(void)
@@ -432,7 +430,7 @@ motor_update(void)
   /* Increment the electrical angle at the current speed. */
   l_inc = angle_inc;
   tmp = l_angle + angle_inc;
-  if (tmp > l_angle)
+  if (tmp < l_angle)
     ++cur_elec_turns;
   l_angle = tmp;
   cur_angle = l_angle;
