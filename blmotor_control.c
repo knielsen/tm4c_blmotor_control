@@ -59,6 +59,7 @@
 /* Define this to get raw accelerometer data out. */
 // ToDo: Enable/disable this with a key instead?
 //#define RAW_DATA 1
+//#define MPU_MEASURE 1
 
 
 static const float F_PI = 3.141592654f;
@@ -723,8 +724,10 @@ int main()
   uint32_t time_wraps, last_time;
   float rampup_seconds, electric_rps;
   float next_checkpoint_seconds;
-#ifdef RAW_DATA
+#ifdef MPU_MEASURE
   float next_mpu_seconds, end_mpu_seconds;
+  uint32_t stop_mpu_angle = 0, stop_mpu_eturns = 0, last_mpu_delta = 0;
+  uint32_t prev_angle = 0;
 #endif
   uint32_t hit_target = 0;
   long user_input;
@@ -756,7 +759,9 @@ int main()
   setup_timer_pwm();
   l6234_disable();
 
-  //config_mpu6050();
+#ifdef MPU_MEASURE
+  config_mpu6050();
+#endif
 
   setup_systick();
   last_time = get_time();
@@ -781,7 +786,7 @@ int main()
   l6234_enable();
 
   next_checkpoint_seconds = 0.500f;
-#ifdef RAW_DATA
+#ifdef MPU_MEASURE
   next_mpu_seconds = 0.001f;
   end_mpu_seconds = 0.000f;
 #endif
@@ -806,6 +811,14 @@ int main()
       println_uint32(angle_inc);
       serial_output_str("  damp:\t");
       println_float(damper, 1, 4);
+#ifdef MPU_MEASURE
+      serial_output_str("  ang:\t");
+      println_uint32(cur_angle);
+      serial_output_str("  turns:\t");
+      println_uint32(cur_elec_turns);
+      serial_output_str("  hit:\t");
+      println_uint32(hit_target);
+#endif
 
       if (led_state)
       {
@@ -822,9 +835,8 @@ int main()
     if (speed_change_status == SPEED_STABLE && !hit_target)
     {
       hit_target = 1;
-#ifdef RAW_DATA
-      next_mpu_seconds = seconds + 1.001f;
-      end_mpu_seconds = seconds + 2.000f;
+#ifdef MPU_MEASURE
+      next_mpu_seconds = seconds + 4.000f;
 #endif
     }
 
@@ -892,17 +904,83 @@ int main()
       }
     }
 
-#ifdef RAW_DATA
-    /* ToDo: This will get rounding errors, could be done better ... */
-    if (hit_target && seconds >= next_mpu_seconds && seconds < end_mpu_seconds)
+#ifdef MPU_MEASURE
+    /*
+      When the motor has been spinning at full speed for a bit, start measuring.
+      We wait until the motor reaches position 0 before starting to measure.
+      And after measuring we stop the motor again at position 0; this provides
+      a stable reference position for interpreting the measurements.
+
+      ToDo: This will get rounding errors, could be done better ...
+    */
+    if (hit_target == 1 && seconds >= next_mpu_seconds &&
+        (cur_elec_turns % 4) == 0 && cur_angle < prev_angle)
     {
-      uint8_t buf[6];
-      int i;
-      next_mpu_seconds += 0.001f;
-      mpu6050_read_accel(buf);
-      for (i = 0; i < 6; ++i)
-        ROM_UARTCharPut(UART0_BASE, buf[i]);
+      /*
+        After measurements, we want to stop at the zero point, which is the
+        point here, where we start measurements.
+
+        We will first slow down to 0.5 RPS, wait until we get to the point
+        stop_mpu_angle, then stop completely within 0.1 seconds. In 0.1
+        seconds at 4*0.5 electrical RPS, we should move around
+        0.5 * (4*0.5) * 0.1 electrical turns, or 1/10.
+      */
+      uint32_t diff = (uint64_t)0x100000000/10;
+      end_mpu_seconds = seconds + 1.000f;
+      stop_mpu_angle = cur_angle;
+      if (stop_mpu_angle > diff)
+        stop_mpu_eturns = cur_elec_turns;
+      else
+        stop_mpu_eturns = cur_elec_turns - 1;
+      stop_mpu_angle -= diff;
+      hit_target = 2;
     }
+    if (hit_target == 2)
+    {
+      if (seconds >= next_mpu_seconds && seconds < end_mpu_seconds)
+      {
+        /* Measure vibrations for a few seconds. */
+        uint8_t buf[6];
+        int i;
+        next_mpu_seconds += 0.001f;
+        mpu6050_read_accel(buf);
+#ifdef RAW_DATA
+        for (i = 0; i < 6; ++i)
+          ROM_UARTCharPut(UART0_BASE, buf[i]);
+#endif
+      }
+      else if (seconds >= end_mpu_seconds && speed_change_status == SPEED_STABLE)
+      {
+        /* Slow down. */
+        speed_change_to = 4.0f*0.5f*((float)0x100000000/(float)PWM_FREQ);
+        speed_change_duration = (uint32_t)(10.0f*PWM_FREQ);
+        speed_change_status = SPEED_CHANGE;
+        hit_target = 3;
+      }
+    }
+    else if (hit_target == 3 && speed_change_status == SPEED_STABLE &&
+             ((cur_elec_turns - stop_mpu_eturns) % 4) == 0)
+    {
+      /* Continue at slow speed until just before the zero point. */
+      last_mpu_delta = cur_angle - stop_mpu_angle;
+      hit_target = 4;
+    }
+    else if (hit_target == 4)
+    {
+      /* Now stop completely at the zero point. */
+      uint32_t delta = cur_angle - stop_mpu_angle;
+      if (((cur_elec_turns - stop_mpu_eturns) % 4) == 0 &&
+          delta < last_mpu_delta)
+      {
+        speed_change_to = 0;
+        speed_change_duration = (uint32_t)(0.1f*PWM_FREQ);
+        speed_change_status = SPEED_CHANGE;
+        hit_target = 5;
+      }
+      else
+        last_mpu_delta = delta;
+    }
+    prev_angle= cur_angle;
 #endif
   }
 }
