@@ -777,8 +777,8 @@ int main()
     position of the motor phases with feedback or hall sensors.
   */
   rampup_seconds = 8.0f;
-  electric_rps = 4.0f*15.305f;
-  damper = 0.4f;
+  electric_rps = 4.0f*25.0f;
+  damper = 0.5f;
 
   speed_change_to = electric_rps*((float)0x100000000/(float)PWM_FREQ);
   speed_change_duration = (uint32_t)(rampup_seconds * PWM_FREQ);
@@ -942,7 +942,7 @@ int main()
         /* Measure vibrations for a few seconds. */
         uint8_t buf[6];
         int i;
-        next_mpu_seconds += 0.001f;
+        next_mpu_seconds += 0.001001f;
         mpu6050_read_accel(buf);
 #ifdef RAW_DATA
         for (i = 0; i < 6; ++i)
@@ -979,6 +979,11 @@ int main()
       }
       else
         last_mpu_delta = delta;
+    }
+    else if (hit_target == 5)
+    {
+      if (speed_change_status == SPEED_STABLE)
+        damper = 0.05f;
     }
     prev_angle= cur_angle;
 #endif
